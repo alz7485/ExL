@@ -43,13 +43,34 @@ DEFAULT_SETTING = {
 
 
 def restart_via_dispatcher():
-    """設定でUIスタイルを切り替えたとき、統合main.py経由で再起動する。"""
+    """
+    UIスタイル切替後、現在のプロセスを統合mainへ即時置換する。
+
+    onedir正式運用では _MEI 一時展開がないため待機は不要。
+    os.execv() で現在プロセスそのものを置き換えることで、
+    旧/新ExLauncherの二重起動を避けつつ高速に切り替える。
+    """
+    app = QApplication.instance()
+    if app is not None:
+        # トレイ/ウィンドウの見た目を先に消してから置換する。
+        tray = getattr(app, "tray_controller", None)
+        if tray is not None:
+            tray_icon = getattr(tray, "tray", None) or getattr(tray, "tray_icon", None)
+            if tray_icon is not None:
+                try:
+                    tray_icon.hide()
+                except Exception:
+                    pass
+        app.closeAllWindows()
+        app.processEvents()
+
     if getattr(sys, "frozen", False):
-        cmd = [sys.executable]
+        target = str(Path(sys.executable).resolve())
+        os.execv(target, [target])
     else:
-        cmd = [sys.executable, str(APP_DIR / "main.py")]
-    subprocess.Popen(cmd, cwd=str(APP_DIR))
-    QApplication.instance().quit()
+        py = str(Path(sys.executable).resolve())
+        main_py = str((APP_DIR / "main.py").resolve())
+        os.execv(py, [py, main_py])
 
 
 def get_app_icon():
