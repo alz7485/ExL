@@ -18,7 +18,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QPoint, QSize, QFileInfo, Signal, QMimeData
-from PySide6.QtGui import QPainter, QFont, QAction, QIcon
+from PySide6.QtGui import QPainter, QFont, QAction, QIcon, QPixmap, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QComboBox, QSpinBox,
@@ -717,7 +717,28 @@ class SettingsDialog(QDialog):
             self.right_button.setChecked(True)
 
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(THEMES.keys())
+        # Classicテーマの一覧にも、テーマ名の左側へ配色サンプルを表示する。
+        # 既存テーマ自体の色・保存仕様は変更しない。
+        for theme_name, colors in THEMES.items():
+            pix = QPixmap(42, 16)
+            pix.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pix)
+            sample_colors = (
+                colors.get("bar", "#000000"),
+                colors.get("window", "#808080"),
+                colors.get("category", "#a0a0a0"),
+                colors.get("control", "#ffffff"),
+            )
+            segment_w = pix.width() / len(sample_colors)
+            for i, color in enumerate(sample_colors):
+                x1 = round(i * segment_w)
+                x2 = round((i + 1) * segment_w)
+                painter.fillRect(x1, 0, x2 - x1, pix.height(), QColor(color))
+            painter.setPen(QColor(colors.get("border", "#666666")))
+            painter.drawRect(0, 0, pix.width() - 1, pix.height() - 1)
+            painter.end()
+            self.theme_combo.addItem(QIcon(pix), theme_name)
+        self.theme_combo.setIconSize(QSize(42, 16))
         self.theme_combo.setCurrentText(settings.get("theme", "Dark Gray"))
         self.theme_combo.currentTextChanged.connect(self.preview_theme)
 
@@ -2683,11 +2704,16 @@ class MainWindow(QMainWindow):
 
             launch_item(obj)
 
-            # ピンOFF: ランチャーから何かを実行・コピーしたら
-            # バーだけ残してメインUIを自動で隠す。
-            # ピンON: 実行後もメインUIを表示したままにする。
-            if not self.settings.get("pin", False):
-                self.hide()
+            # 定型文はコピー後もランチャーを収納しない。
+            # ファイル／フォルダ／Web は、ピンOFF時のみ
+            # バー左クリック収納とまったく同じ経路で収納する。
+            # これにより展開状態の保存 → 全収納 → バーだけ表示、
+            # という手動バー収納時の挙動と一致する。
+            if (
+                obj.get("type") != "text"
+                and not self.settings.get("pin", False)
+            ):
+                self.toggle_from_bar()
 
     # ========================================================
     # メインUI右クリック
