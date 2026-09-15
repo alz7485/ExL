@@ -487,7 +487,7 @@ class ModernWindow(QMainWindow):
         self.setFixedWidth(max(170, int(int(self.data.get("ui_width", 220)) * 0.90)))
         t = palette(self.modern_theme)
         self.setStyleSheet(app_qss(self.modern_theme))
-        self.top_bar.setStyleSheet(f"QFrame#topBar{{background:{gradient(t['bar'], t['bar2'])};border:1px solid {t['border']};border-radius:9px;}}")
+        self.top_bar.setStyleSheet(f"QFrame#topBar{{background:{gradient(t['bar'], t['bar2'])};border:1px solid {t['border']};border-radius:4px;}}")
         self.add_category_btn.setStyleSheet(f"QPushButton#addCategoryButton{{background:{gradient(t['category_add'], t['category_add2'])};color:{t['text']};border:1px dashed {t['border']};border-radius:8px;text-align:left;padding-left:10px;}} QPushButton#addCategoryButton:hover{{background:{gradient(t['category_add_hover'], t['category_add2_hover'])};border-color:{t['accent']};}}")
         self.drag_bar.apply_theme(self.modern_theme); self.drag_bar.bar_pin = bool(self.settings.get("pin", False)); self.drag_bar.update()
         for p in self.category_panels: p.apply_theme(self.modern_theme)
@@ -753,7 +753,11 @@ class ModernWindow(QMainWindow):
         except Exception: return
         if obj.get("type") == "separator": return
         ok = launch_item(obj, copy_text=lambda txt: QApplication.clipboard().setText(txt))
-        if ok and not self.settings.get("pin", False): self.hide()
+        # 定型文は「コピー」が目的なので、ピンOFFでもランチャーを閉じない。
+        # それ以外はバークリック収納と同じ流れで、少し速く収納する。
+        if ok and obj.get("type") != "text" and not self.settings.get("pin", False):
+            if self.isVisible() and not self._slide_animating:
+                self._snapshot_hide_to_bar(horizontal_duration=245, category_duration=165)
 
     def normal_item_right_click(self, ci, ii):
         """通常モードの右クリックはClassic版と同じ操作にする。"""
@@ -1129,8 +1133,14 @@ class ModernWindow(QMainWindow):
         elif self._bar_collapsed and self._bar_hidden_anchor is not None:
             anchor = QPoint(self._bar_hidden_anchor)
 
-        if anchor is not None and self.drag_bar.pos() != anchor:
-            self.drag_bar.move(anchor)
+        if anchor is not None:
+            anchor = self._clamp_bar_position(anchor)
+            if self._bar_transition_anchor is not None:
+                self._bar_transition_anchor = QPoint(anchor)
+            elif self._bar_collapsed:
+                self._bar_hidden_anchor = QPoint(anchor)
+            if self.drag_bar.pos() != anchor:
+                self.drag_bar.move(anchor)
 
     def on_bar_bottom_right_click(self):
         """バー下部ボタン右クリック。バー収納中（メイン非表示）は無効。"""
@@ -1341,9 +1351,12 @@ class ModernWindow(QMainWindow):
         anim.valueChanged.connect(lambda v: (proxy.set_progress(float(v)), self._force_bar_anchor()))
 
         def done():
-            self._cleanup_snapshot_proxy(proxy)
+            # 復帰時は実UIを先に表示してからスナップショットを消す。
+            # 逆順だと Windows/Qt で1フレーム空白が出て「展開が変」に見える。
             self._slide_animation = None
             finished()
+            QApplication.processEvents()
+            self._cleanup_snapshot_proxy(proxy)
 
         anim.finished.connect(done)
         self._slide_animation = anim
@@ -1363,7 +1376,7 @@ class ModernWindow(QMainWindow):
         QApplication.processEvents()
         return self.grab(), int(self.height())
 
-    def _snapshot_hide_to_bar(self):
+    def _snapshot_hide_to_bar(self, horizontal_duration: int = 330, category_duration: int = 220):
         """
         バークリック収納。
 
@@ -1375,7 +1388,8 @@ class ModernWindow(QMainWindow):
         self._slide_animating = True
         self._bar_phase_fit = True
         self._expanded_before_bar_hide = [
-            i for i, p in enumerate(self.category_panels) if p.expanded
+            i for i, p in enumerate(self.category_panels)
+            if bool(getattr(p, "_target_expanded", p.expanded))
         ]
         self._bar_transition_anchor = QPoint(self.drag_bar.pos())
         self._bar_hidden_anchor = QPoint(self.drag_bar.pos())
@@ -1386,7 +1400,7 @@ class ModernWindow(QMainWindow):
         # 開いているカテゴリだけを同時に閉じる。
         for panel in self.category_panels:
             if panel.expanded or getattr(panel, "_target_expanded", False):
-                panel.set_expanded(False, True)
+                panel.set_expanded(False, True, category_duration)
 
         def after_all_collapsed():
             self._bar_phase_fit = False
@@ -1413,7 +1427,7 @@ class ModernWindow(QMainWindow):
                 collapsed_pix,
                 old_pos,
                 True,
-                330,
+                horizontal_duration,
                 finish_hide,
             )
 
@@ -1513,29 +1527,76 @@ class ModernWindow(QMainWindow):
     def hide_main(self):
         self.hide(); self.drag_bar.hide()
 
+    def _clamp_bar_position(self, pos: QPoint) -> QPoint:
+        """バーのドラッグ可能部分が完全に画面外へ出ないようにする。"""
+        bw = self.drag_bar.width()
+        bh = self.drag_bar.height()
+        probe = QPoint(pos.x() + bw // 2, pos.y() + min(12, max(1, bh // 2)))
+        screen = QApplication.screenAt(probe) or QApplication.primaryScreen()
+        if screen is None:
+            return QPoint(pos)
+        g = screen.availableGeometry()
+        # 横方向はバー全幅を画面内に維持。縦方向は上端24px以上を必ず残し、
+        # バー本体のドラッグ領域を掴めなくなる状態を防ぐ。
+        x = max(g.left(), min(pos.x(), g.right() - bw + 1))
+        y = max(g.top(), min(pos.y(), g.bottom() - min(24, bh) + 1))
+        return QPoint(x, y)
+
     def move_from_bar(self, pos):
-        self.move(pos); self.update_pair_geometry()
+        if self._bar_collapsed and not self.isVisible():
+            # バーだけの時は signal の座標自体がバー座標。
+            bar_pos = self._clamp_bar_position(QPoint(pos))
+            self._bar_hidden_anchor = QPoint(bar_pos)
+            self._bar_transition_anchor = None
+            self.drag_bar.move(bar_pos)
+            # 次回展開位置も新しいバー位置へ追従させる。
+            if self.settings.get("drag_bar_position", "right") == "left":
+                self.move(bar_pos.x() + self.drag_bar.width(), bar_pos.y())
+            else:
+                self.move(bar_pos.x() - self.width(), bar_pos.y())
+            return
+
+        # メイン表示中は signal の座標がメインUI座標。バー予定位置を先に
+        # 画面内へ補正し、その位置からメインUI座標を逆算する。
+        proposed_main = QPoint(pos)
+        if self.settings.get("drag_bar_position", "right") == "left":
+            proposed_bar = QPoint(proposed_main.x() - self.drag_bar.width(), proposed_main.y())
+            bar_pos = self._clamp_bar_position(proposed_bar)
+            main_pos = QPoint(bar_pos.x() + self.drag_bar.width(), bar_pos.y())
+        else:
+            proposed_bar = QPoint(proposed_main.x() + self.width(), proposed_main.y())
+            bar_pos = self._clamp_bar_position(proposed_bar)
+            main_pos = QPoint(bar_pos.x() - self.width(), bar_pos.y())
+        self.move(main_pos)
+        self.drag_bar.move(bar_pos)
 
     def update_pair_geometry(self):
         if not hasattr(self, "drag_bar"):
             return
-        self.drag_bar.setFixedHeight(self.height())
 
-        # バークリックで収納済みの間は、後から飛んでくるFITタイマーでも
-        # バー座標をメインウィンドウ基準に再計算しない。
+        # バーだけの状態では収納時の高さを維持する。ここで hidden main の
+        # 高さへ戻すと、ドラッグ時に見た目だけ元位置へ固定されたように見える。
         if self._bar_collapsed and not self.isVisible() and self._bar_hidden_anchor is not None:
-            self.drag_bar.move(self._bar_hidden_anchor)
+            anchor = self._clamp_bar_position(QPoint(self._bar_hidden_anchor))
+            self._bar_hidden_anchor = QPoint(anchor)
+            self.drag_bar.move(anchor)
             return
 
+        self.drag_bar.setFixedHeight(self.height())
+
         if self._bar_transition_anchor is not None:
-            self.drag_bar.move(self._bar_transition_anchor)
+            anchor = self._clamp_bar_position(QPoint(self._bar_transition_anchor))
+            self._bar_transition_anchor = QPoint(anchor)
+            self.drag_bar.move(anchor)
             return
         if self._slide_animating:
             return
         if self.settings.get("drag_bar_position", "right") == "left":
-            self.drag_bar.move(self.x() - self.drag_bar.width(), self.y())
+            target = QPoint(self.x() - self.drag_bar.width(), self.y())
         else:
-            self.drag_bar.move(self.x() + self.width(), self.y())
+            target = QPoint(self.x() + self.width(), self.y())
+        target = self._clamp_bar_position(target)
+        self.drag_bar.move(target)
 
     def moveEvent(self, event):
         super().moveEvent(event); self.update_pair_geometry()
