@@ -358,7 +358,7 @@ class CategoryPanel(QWidget):
         gaps = max(0, visible_count - 1) * self.ITEM_GAP
         return row_heights + gaps
 
-    def set_expanded(self, expanded: bool, animate: bool = True):
+    def set_expanded(self, expanded: bool, animate: bool = True, duration: int = 220):
         expanded = bool(expanded)
         self._target_expanded = expanded
 
@@ -404,12 +404,12 @@ class CategoryPanel(QWidget):
         self._animating = True
 
         height_anim = QPropertyAnimation(self, b"contentHeight", self)
-        height_anim.setDuration(220)
+        height_anim.setDuration(max(1, int(duration)))
         height_anim.setStartValue(start)
         height_anim.setEndValue(target)
 
         opacity_anim = QPropertyAnimation(self.opacity, b"opacity", self)
-        opacity_anim.setDuration(220)
+        opacity_anim.setDuration(max(1, int(duration)))
         opacity_anim.setStartValue(self.opacity.opacity())
         opacity_anim.setEndValue(1.0 if expanded else 0.0)
 
@@ -601,7 +601,8 @@ class DragBar(QWidget):
             self.rightClicked.emit(); event.accept(); return
         if event.button() == Qt.MouseButton.LeftButton:
             self.press_pos = event.globalPosition().toPoint()
-            self.start_window_pos = self.property("main_window").pos() if self.property("main_window") else self.pos()
+            main = self.property("main_window")
+            self.start_window_pos = main.pos() if (main is not None and main.isVisible()) else self.pos()
             self.dragged = False
             event.accept()
 
